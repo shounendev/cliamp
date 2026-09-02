@@ -19,10 +19,13 @@ const cacheTTL = 24 * time.Hour
 // ytCache stores playlists and tracks on disk for fast startup.
 // Path: ~/.config/cliamp/ytmusic_cache.json
 type ytCache struct {
-	Scope       string                     `json:"scope"`
-	Playlists   []playlistEntry            `json:"playlists,omitempty"`
-	PlaylistsAt time.Time                  `json:"playlists_at"`
-	Tracks      map[string]cachedTrackList `json:"tracks,omitempty"`
+	Scope       string          `json:"scope"`
+	Playlists   []playlistEntry `json:"playlists,omitempty"`
+	PlaylistsAt time.Time       `json:"playlists_at"`
+	// YTMPlaylists are the IDs present in the YouTube Music library, which
+	// classifies them as music regardless of their video categories.
+	YTMPlaylists []string                   `json:"ytm_playlists,omitempty"`
+	Tracks       map[string]cachedTrackList `json:"tracks,omitempty"`
 }
 
 type cachedTrackList struct {
@@ -114,9 +117,15 @@ func (c *ytCache) tracksFresh(playlistID string) ([]playlist.Track, bool) {
 	return ct.Items, true
 }
 
-func (c *ytCache) setPlaylists(pl []playlistEntry) {
+func (c *ytCache) setPlaylists(pl []playlistEntry, inYTM map[string]bool) {
 	c.Playlists = pl
 	c.PlaylistsAt = time.Now()
+	c.YTMPlaylists = nil
+	for _, entry := range pl {
+		if inYTM[entry.ID] {
+			c.YTMPlaylists = append(c.YTMPlaylists, entry.ID)
+		}
+	}
 }
 
 func (c *ytCache) setTracks(playlistID string, tracks []playlist.Track) {
@@ -128,6 +137,7 @@ func (c *ytCache) setTracks(playlistID string, tracks []playlist.Track) {
 
 func (c *ytCache) clear() {
 	c.Playlists = nil
+	c.YTMPlaylists = nil
 	c.PlaylistsAt = time.Time{}
 	c.Tracks = make(map[string]cachedTrackList)
 }

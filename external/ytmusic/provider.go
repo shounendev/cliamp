@@ -194,6 +194,11 @@ func (b *baseProvider) fetchAndClassify() error {
 				}
 			}
 			if allClassified {
+				// The disk classification holds category-derived verdicts only;
+				// re-apply the YouTube Music override on top of it.
+				for _, id := range dc.YTMPlaylists {
+					classified[id] = true
+				}
 				b.allPlaylists = dc.Playlists
 				b.classified = classified
 				b.mu.Unlock()
@@ -221,8 +226,15 @@ func (b *baseProvider) fetchAndClassify() error {
 
 	// The library scrape shells out to yt-dlp, so start it now and let it run
 	// alongside the API listing below.
-	libraryIDs := make(chan []string, 1)
-	go func() { libraryIDs <- b.libraryPlaylistIDs() }()
+	type libraryResult struct {
+		ids   []string
+		inYTM map[string]bool
+	}
+	libraryCh := make(chan libraryResult, 1)
+	go func() {
+		ids, inYTM := b.librarySources()
+		libraryCh <- libraryResult{ids, inYTM}
+	}()
 
 	var all []playlistEntry
 	seen := make(map[string]bool)
@@ -264,8 +276,9 @@ func (b *baseProvider) fetchAndClassify() error {
 	// Mine(true) only returns playlists the user owns. Playlists saved to the
 	// library from other channels have no listing endpoint in the Data API, so
 	// their IDs come from the browser session and are hydrated by ID here.
+	library := <-libraryCh
 	var saved []string
-	for _, id := range <-libraryIDs {
+	for _, id := range library.ids {
 		// Liked Music / Liked Videos are pinned separately by each provider.
 		if id == playlistIDLikedMusic || id == playlistIDLikedVideos || seen[id] {
 			continue
@@ -281,7 +294,7 @@ func (b *baseProvider) fetchAndClassify() error {
 	// Classify playlists (parallel, with disk cache).
 	// Pass nil to let classifyPlaylists load from disk itself —
 	// the earlier loadClassification() was skipped because cache was stale.
-	classified := classifyWithTimeout(svc, all, 60*time.Second, nil, cacheScope)
+	classified := classifyWithTimeout(svc, all, 60*time.Second, nil, cacheScope, library.inYTM)
 
 	b.mu.Lock()
 	if b.allPlaylists != nil {
@@ -291,9 +304,10 @@ func (b *baseProvider) fetchAndClassify() error {
 	}
 	b.allPlaylists = all
 	b.classified = classified
-	// Persist playlists to disk cache.
+	// Persist playlists to disk cache. YouTube Music membership is stored
+	// alongside them so a cache-only boot can re-apply the same override.
 	dc = b.ensureDiskCache()
-	dc.setPlaylists(all)
+	dc.setPlaylists(all, library.inYTM)
 	snap := dc.snapshot()
 	b.mu.Unlock()
 
@@ -303,23 +317,25 @@ func (b *baseProvider) fetchAndClassify() error {
 	return nil
 }
 
-// libraryPlaylistIDs returns the playlist IDs in the user's library, including
+// librarySources returns the playlist IDs in the user's library, plus the set
+// of those that live in the YouTube Music library specifically — membership
+// there is what marks a playlist as music (see classifyPlaylists). Including
 // playlists saved from other channels. The Data API cannot list these —
 // Playlists.List only filters by owner (mine) or channel — so they come from
 // the signed-in browser session, merged from two places that do not overlap:
 // the YouTube feed and the YouTube Music library. Returns nil when no cookie
 // source is configured; either source failing is non-fatal, since the owned
 // playlists still list.
-func (b *baseProvider) libraryPlaylistIDs() []string {
+func (b *baseProvider) librarySources() (ids []string, inYTM map[string]bool) {
+	inYTM = make(map[string]bool)
 	if b.cookiesFrom == "" {
-		return nil
+		return nil, inYTM
 	}
 	fetch := b.fetchLibrary
 	if fetch == nil {
 		fetch = resolve.FetchUserPlaylists
 	}
 
-	var ids []string
 	seen := make(map[string]bool)
 	add := func(id string) {
 		if id = strings.TrimSpace(id); id != "" && !seen[id] {
@@ -355,11 +371,14 @@ func (b *baseProvider) libraryPlaylistIDs() []string {
 	} else {
 		applog.Debug("youtube music: library returned %d playlists", len(ytmIDs))
 		for _, id := range ytmIDs {
+			if id = strings.TrimSpace(id); id != "" {
+				inYTM[id] = true
+			}
 			add(id)
 		}
 	}
 
-	return ids
+	return ids, inYTM
 }
 
 // hydratePlaylists resolves playlist IDs into entries via the Data API, which

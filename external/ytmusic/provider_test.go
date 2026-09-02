@@ -17,7 +17,7 @@ func TestRefreshInvalidatesAllCaches(t *testing.T) {
 	b.trackCache["p1"] = []playlist.Track{{Path: "https://example/v", Title: "t"}}
 
 	dc := b.ensureDiskCache()
-	dc.setPlaylists(b.allPlaylists)
+	dc.setPlaylists(b.allPlaylists, nil)
 	dc.setTracks("p1", b.trackCache["p1"])
 	saveSnapshot(dc.snapshot())
 
