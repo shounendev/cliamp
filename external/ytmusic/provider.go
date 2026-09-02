@@ -26,22 +26,27 @@ type itemInfo struct {
 // youtubeAPIBatchSize is the maximum number of items per YouTube Data API request.
 const youtubeAPIBatchSize = 50
 
+// ytmLibraryTimeout bounds the YouTube Music library listing, which shells out
+// to yt-dlp for cookies and then pages through InnerTube.
+const ytmLibraryTimeout = 45 * time.Second
+
 // baseProvider holds shared state for YouTube and YouTube Music providers.
 // Both providers share the same OAuth session and track cache.
 type baseProvider struct {
-	session      *Session
-	clientID     string
-	clientSecret string
-	cookiesFrom  string // browser name for yt-dlp --cookies-from-browser ("" when unset)
-	hasCookies   bool   // true when cookies_from is configured
-	fetchLibrary func(browser string) ([]playlist.PlaylistInfo, error)
-	mu           sync.Mutex
-	trackCache   map[string][]playlist.Track // playlist ID -> cached tracks
-	allPlaylists []playlistEntry             // cached raw playlist list
-	classified   map[string]bool             // playlist ID -> is music (from classify.go)
-	disk         *ytCache                    // lazy-loaded disk cache
-	cacheScope   string                      // immutable identity of the active OAuth account
-	authCancel   context.CancelFunc          // cancels any in-progress OAuth flow
+	session         *Session
+	clientID        string
+	clientSecret    string
+	cookiesFrom     string // browser name for yt-dlp --cookies-from-browser ("" when unset)
+	hasCookies      bool   // true when cookies_from is configured
+	fetchLibrary    func(browser string) ([]playlist.PlaylistInfo, error)
+	fetchYTMLibrary func(ctx context.Context, browser string) ([]string, error)
+	mu              sync.Mutex
+	trackCache      map[string][]playlist.Track // playlist ID -> cached tracks
+	allPlaylists    []playlistEntry             // cached raw playlist list
+	classified      map[string]bool             // playlist ID -> is music (from classify.go)
+	disk            *ytCache                    // lazy-loaded disk cache
+	cacheScope      string                      // immutable identity of the active OAuth account
+	authCancel      context.CancelFunc          // cancels any in-progress OAuth flow
 }
 
 func newBase(session *Session, clientID, clientSecret, cookiesFrom string) *baseProvider {
@@ -51,14 +56,15 @@ func newBase(session *Session, clientID, clientSecret, cookiesFrom string) *base
 		cacheScope = session.cacheScope
 	}
 	return &baseProvider{
-		session:      session,
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		cookiesFrom:  cookiesFrom,
-		hasCookies:   cookiesFrom != "",
-		fetchLibrary: resolve.FetchUserPlaylists,
-		trackCache:   make(map[string][]playlist.Track),
-		cacheScope:   cacheScope,
+		session:         session,
+		clientID:        clientID,
+		clientSecret:    clientSecret,
+		cookiesFrom:     cookiesFrom,
+		hasCookies:      cookiesFrom != "",
+		fetchLibrary:    resolve.FetchUserPlaylists,
+		fetchYTMLibrary: ytmLibraryPlaylistIDs,
+		trackCache:      make(map[string][]playlist.Track),
+		cacheScope:      cacheScope,
 	}
 }
 
@@ -297,12 +303,13 @@ func (b *baseProvider) fetchAndClassify() error {
 	return nil
 }
 
-// libraryPlaylistIDs returns the playlist IDs in the user's YouTube library,
-// including playlists saved from other channels. The Data API cannot list
-// these — Playlists.List only filters by owner (mine) or channel — so they are
-// scraped from the signed-in browser session via yt-dlp. Returns nil when no
-// cookie source is configured or the scrape fails; a missing library is not
-// fatal, the owned playlists still list.
+// libraryPlaylistIDs returns the playlist IDs in the user's library, including
+// playlists saved from other channels. The Data API cannot list these —
+// Playlists.List only filters by owner (mine) or channel — so they come from
+// the signed-in browser session, merged from two places that do not overlap:
+// the YouTube feed and the YouTube Music library. Returns nil when no cookie
+// source is configured; either source failing is non-fatal, since the owned
+// playlists still list.
 func (b *baseProvider) libraryPlaylistIDs() []string {
 	if b.cookiesFrom == "" {
 		return nil
@@ -311,21 +318,47 @@ func (b *baseProvider) libraryPlaylistIDs() []string {
 	if fetch == nil {
 		fetch = resolve.FetchUserPlaylists
 	}
+
+	var ids []string
+	seen := make(map[string]bool)
+	add := func(id string) {
+		if id = strings.TrimSpace(id); id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	// The YouTube feed (youtube.com/feed/playlists).
 	pls, err := fetch(b.cookiesFrom)
 	if err != nil {
 		// Non-fatal: owned playlists still list. Surface it though — the usual
 		// cause is yt-dlp being unable to read browser cookies, which is
 		// invisible otherwise.
 		applog.UserWarn("youtube: cannot list saved playlists from %s cookies: %v", b.cookiesFrom, err)
-		return nil
-	}
-	applog.Debug("youtube: library scrape returned %d playlists from %s cookies", len(pls), b.cookiesFrom)
-	ids := make([]string, 0, len(pls))
-	for _, pl := range pls {
-		if id := strings.TrimSpace(pl.ID); id != "" {
-			ids = append(ids, id)
+	} else {
+		applog.Debug("youtube: feed scrape returned %d playlists from %s cookies", len(pls), b.cookiesFrom)
+		for _, pl := range pls {
+			add(pl.ID)
 		}
 	}
+
+	// The YouTube Music library, which the feed above does not cover.
+	fetchYTM := b.fetchYTMLibrary
+	if fetchYTM == nil {
+		fetchYTM = ytmLibraryPlaylistIDs
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ytmLibraryTimeout)
+	defer cancel()
+	ytmIDs, err := fetchYTM(ctx, b.cookiesFrom)
+	if err != nil {
+		applog.UserWarn("youtube music: cannot list library playlists: %v", err)
+	} else {
+		applog.Debug("youtube music: library returned %d playlists", len(ytmIDs))
+		for _, id := range ytmIDs {
+			add(id)
+		}
+	}
+
 	return ids
 }
 
