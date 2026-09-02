@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/resolve"
 
@@ -266,7 +267,10 @@ func (b *baseProvider) fetchAndClassify() error {
 		seen[id] = true
 		saved = append(saved, id)
 	}
-	all = append(all, b.hydratePlaylists(ctx, svc, saved)...)
+	hydrated := b.hydratePlaylists(ctx, svc, saved)
+	applog.Debug("youtube: %d owned playlists, %d saved playlists resolved from %d library IDs",
+		len(all), len(hydrated), len(saved))
+	all = append(all, hydrated...)
 
 	// Classify playlists (parallel, with disk cache).
 	// Pass nil to let classifyPlaylists load from disk itself —
@@ -309,8 +313,13 @@ func (b *baseProvider) libraryPlaylistIDs() []string {
 	}
 	pls, err := fetch(b.cookiesFrom)
 	if err != nil {
+		// Non-fatal: owned playlists still list. Surface it though — the usual
+		// cause is yt-dlp being unable to read browser cookies, which is
+		// invisible otherwise.
+		applog.UserWarn("youtube: cannot list saved playlists from %s cookies: %v", b.cookiesFrom, err)
 		return nil
 	}
+	applog.Debug("youtube: library scrape returned %d playlists from %s cookies", len(pls), b.cookiesFrom)
 	ids := make([]string, 0, len(pls))
 	for _, pl := range pls {
 		if id := strings.TrimSpace(pl.ID); id != "" {
