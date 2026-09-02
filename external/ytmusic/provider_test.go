@@ -10,7 +10,7 @@ import (
 func TestRefreshInvalidatesAllCaches(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	b := newBase(nil, "client-id", "client-secret", false)
+	b := newBase(nil, "client-id", "client-secret", "")
 
 	b.allPlaylists = []playlistEntry{{ID: "p1", Name: "One", TrackCount: 5}}
 	b.classified = map[string]bool{"p1": true}

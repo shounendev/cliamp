@@ -55,7 +55,7 @@ func TestOAuthCacheScopeBoundToProvider(t *testing.T) {
 	if err := saveCreds(&storedCreds{RefreshToken: "account-a"}); err != nil {
 		t.Fatal(err)
 	}
-	b := newBase(nil, "client", "secret", false)
+	b := newBase(nil, "client", "secret", "")
 	scopeA := b.cacheScope
 
 	if err := saveCreds(&storedCreds{RefreshToken: "account-b"}); err != nil {
