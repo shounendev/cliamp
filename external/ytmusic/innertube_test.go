@@ -93,3 +93,43 @@ func TestParseNetscapeCookiesFallbackSAPISID(t *testing.T) {
 		t.Errorf("sapisid = %q, want %q", sapisid, "fallback")
 	}
 }
+
+// Album entries navigate to an MPREb_ browse ID the Data API cannot serve, so
+// the album's own OLAK5uy_ track playlist must be picked up instead — and not
+// the RDAMPL… radio playlist sitting beside it.
+func TestParseLibraryPlaylistsAlbums(t *testing.T) {
+	body := []byte(`{"contents":[
+		{"musicTwoRowItemRenderer":{
+		  "title":{"runs":[{"text":"R Plus Seven"}]},
+		  "navigationEndpoint":{"browseEndpoint":{"browseId":"MPREb_eZhiASkN4bg"}},
+		  "menu":{"items":[{"menuNavigationItemRenderer":{"navigationEndpoint":
+		    {"watchEndpoint":{"playlistId":"RDAMPLOLAK5uy_radio"}}}}]},
+		  "thumbnailOverlay":{"musicItemThumbnailOverlayRenderer":{"content":
+		    {"musicPlayButtonRenderer":{"playNavigationEndpoint":
+		      {"watchPlaylistEndpoint":{"playlistId":"OLAK5uy_album1"}}}}}}}},
+		{"musicTwoRowItemRenderer":{
+		  "title":{"runs":[{"text":"An artist"}]},
+		  "navigationEndpoint":{"browseEndpoint":{"browseId":"UCsomechannel"}}}}]}`)
+
+	ids, _ := parseLibraryPlaylists(body)
+	if len(ids) != 1 {
+		t.Fatalf("ids = %v, want exactly the album playlist", ids)
+	}
+	if ids[0] != "OLAK5uy_album1" {
+		t.Errorf("ids[0] = %q, want %q", ids[0], "OLAK5uy_album1")
+	}
+}
+
+// A playlist entry must still resolve by its VL browse ID, not by scanning for
+// an album playlist that is not there.
+func TestItemPlaylistIDPrefersBrowseID(t *testing.T) {
+	item := map[string]any{
+		"navigationEndpoint": map[string]any{
+			"browseEndpoint": map[string]any{"browseId": "VLPLreal"},
+		},
+		"menu": map[string]any{"playlistId": "OLAK5uy_shouldNotWin"},
+	}
+	if got := itemPlaylistID(item); got != "PLreal" {
+		t.Errorf("itemPlaylistID() = %q, want %q", got, "PLreal")
+	}
+}

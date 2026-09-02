@@ -26,8 +26,9 @@ const (
 	innertubeBrowseURL = "https://music.youtube.com/youtubei/v1/browse"
 	innertubeOrigin    = "https://music.youtube.com"
 
-	// browseIDLibraryPlaylists is "Library › Playlists" in YouTube Music.
-	innertubeLibraryBrowseID = "FEmusic_liked_playlists"
+	// albumPlaylistPrefix marks the auto-generated playlist that holds an
+	// album's tracks. The Data API serves these like any other playlist.
+	albumPlaylistPrefix = "OLAK5uy_"
 
 	innertubeClientName    = "WEB_REMIX"
 	innertubeClientVersion = "1.20250101.01.00"
@@ -40,6 +41,14 @@ const (
 )
 
 var innertubeClient = &http.Client{Timeout: 30 * time.Second}
+
+// innertubeLibraryBrowseIDs are the YouTube Music library shelves that hold
+// playable collections. Albums live in their own shelf and are missed entirely
+// if only the playlists shelf is read.
+var innertubeLibraryBrowseIDs = []string{
+	"FEmusic_liked_playlists", // Library › Playlists
+	"FEmusic_liked_albums",    // Library › Albums
+}
 
 // ytmLibraryPlaylistIDs returns the playlist IDs in the user's YouTube Music
 // library, including playlists saved from other channels. browser is a yt-dlp
@@ -54,12 +63,40 @@ func ytmLibraryPlaylistIDs(ctx context.Context, browser string) ([]string, error
 	}
 
 	var (
+		ids      []string
+		seen     = make(map[string]bool)
+		firstErr error
+	)
+	for _, browseID := range innertubeLibraryBrowseIDs {
+		shelfIDs, err := browseLibraryShelf(ctx, cookieHeader, sapisid, browseID)
+		if err != nil {
+			// One empty or failing shelf must not lose the other's contents.
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, id := range shelfIDs {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return ids, nil
+}
+
+// browseLibraryShelf pages through one library shelf, returning its playlist IDs.
+func browseLibraryShelf(ctx context.Context, cookieHeader, sapisid, browseID string) ([]string, error) {
+	var (
 		ids          []string
-		seen         = make(map[string]bool)
 		continuation string
 	)
 	for page := 0; page < innertubeMaxPages; page++ {
-		body, err := innertubeBrowse(ctx, cookieHeader, sapisid, continuation)
+		body, err := innertubeBrowse(ctx, cookieHeader, sapisid, browseID, continuation)
 		if err != nil {
 			if page > 0 {
 				break // keep whatever paged in successfully
@@ -67,12 +104,7 @@ func ytmLibraryPlaylistIDs(ctx context.Context, browser string) ([]string, error
 			return nil, err
 		}
 		pageIDs, next := parseLibraryPlaylists(body)
-		for _, id := range pageIDs {
-			if !seen[id] {
-				seen[id] = true
-				ids = append(ids, id)
-			}
-		}
+		ids = append(ids, pageIDs...)
 		if next == "" || next == continuation {
 			break
 		}
@@ -83,7 +115,7 @@ func ytmLibraryPlaylistIDs(ctx context.Context, browser string) ([]string, error
 
 // innertubeBrowse issues one browse request. An empty continuation requests the
 // first page; otherwise the token is followed.
-func innertubeBrowse(ctx context.Context, cookieHeader, sapisid, continuation string) ([]byte, error) {
+func innertubeBrowse(ctx context.Context, cookieHeader, sapisid, browseID, continuation string) ([]byte, error) {
 	payload := map[string]any{
 		"context": map[string]any{
 			"client": map[string]any{
@@ -95,7 +127,7 @@ func innertubeBrowse(ctx context.Context, cookieHeader, sapisid, continuation st
 		},
 	}
 	if continuation == "" {
-		payload["browseId"] = innertubeLibraryBrowseID
+		payload["browseId"] = browseID
 	} else {
 		payload["continuation"] = continuation
 	}
@@ -150,7 +182,7 @@ func parseLibraryPlaylists(body []byte) (ids []string, continuation string) {
 		switch v := node.(type) {
 		case map[string]any:
 			if item, ok := v["musicTwoRowItemRenderer"].(map[string]any); ok {
-				if id := browseIDOf(item); id != "" {
+				if id := itemPlaylistID(item); id != "" {
 					ids = append(ids, id)
 				}
 			}
@@ -172,23 +204,46 @@ func parseLibraryPlaylists(body []byte) (ids []string, continuation string) {
 	return ids, continuation
 }
 
-// browseIDOf extracts a playlist ID from a library item renderer. Library
-// browse IDs are prefixed "VL" ("View List"); non-playlist items (artists,
-// albums) use other prefixes and are skipped.
-func browseIDOf(item map[string]any) string {
-	nav, ok := item["navigationEndpoint"].(map[string]any)
-	if !ok {
-		return ""
+// itemPlaylistID extracts the playable playlist ID from a library item.
+// Playlist entries navigate to a "VL"-prefixed ("View List") browse ID. Album
+// entries navigate to an album browse ID (MPREb_…) that the Data API does not
+// serve, but they carry their track playlist ("OLAK5uy_…") alongside, which it
+// does. Other item types (artists, podcasts) yield neither and are skipped.
+func itemPlaylistID(item map[string]any) string {
+	if nav, ok := item["navigationEndpoint"].(map[string]any); ok {
+		if be, ok := nav["browseEndpoint"].(map[string]any); ok {
+			if id, _ := be["browseId"].(string); strings.HasPrefix(id, "VL") && len(id) > 2 {
+				return strings.TrimPrefix(id, "VL")
+			}
+		}
 	}
-	be, ok := nav["browseEndpoint"].(map[string]any)
-	if !ok {
-		return ""
+	return albumPlaylistID(item)
+}
+
+// albumPlaylistID finds an album's track playlist within its item renderer.
+// The same item also carries a "RDAMPL…"-prefixed radio playlist built from the
+// album; only the bare OLAK5uy_ ID holds the album's own tracks.
+func albumPlaylistID(node any) string {
+	switch v := node.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if key == "playlistId" || key == "audioPlaylistId" {
+				if id, ok := child.(string); ok && strings.HasPrefix(id, albumPlaylistPrefix) {
+					return id
+				}
+			}
+			if id := albumPlaylistID(child); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if id := albumPlaylistID(child); id != "" {
+				return id
+			}
+		}
 	}
-	id, _ := be["browseId"].(string)
-	if !strings.HasPrefix(id, "VL") || len(id) <= 2 {
-		return ""
-	}
-	return strings.TrimPrefix(id, "VL")
+	return ""
 }
 
 // browserCookies exports the browser's cookie jar via yt-dlp and returns a
