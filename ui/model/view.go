@@ -22,7 +22,7 @@ const trackInfoMarqueeWidth = 48
 var (
 	seekFillStyle = lipgloss.NewStyle().Foreground(ui.ColorSeekBar)
 	seekDimStyle  = lipgloss.NewStyle().Foreground(ui.ColorDim)
-	volBarStyle   = lipgloss.NewStyle().Foreground(ui.ColorVolume)
+	volBarStyle   = lipgloss.NewStyle().Foreground(ui.ColorAccent)
 	activeToggle  = lipgloss.NewStyle().Foreground(ui.ColorAccent).Bold(true)
 	// favMarkerStyle paints the favorite heart in the theme's red so it
 	// reads as a deliberate accent instead of inheriting the dim/unavailable

@@ -42,12 +42,16 @@ Press `t` to show the theme in the list immediately.
 | Key         | Color use                                   |
 |-------------|---------------------------------------------|
 | `bg`        | Optional application background             |
-| `accent`    | Title, track name, seek bar, selected items |
-| `bright_fg` | Primary text and time display               |
+| `accent`    | Title, track name, seek bar, selected items, playing track, volume bar, visualizer base |
+| `bright_fg` | Primary text, time display, visualizer peak |
 | `fg`        | Muted text, help bar, inactive elements     |
-| `green`     | Playing, success, volume, spectrum low      |
-| `yellow`    | Warnings and spectrum middle               |
-| `red`       | Errors and spectrum top                    |
+| `green`     | Playing status and success messages         |
+| `yellow`    | Warnings                                    |
+| `red`       | Errors                                      |
+
+Visualizers draw a three-step gradient from `accent` at the base, through an
+even mix of `accent` and `bright_fg`, to `bright_fg` at the peak. The terminal
+default theme keeps the classic green, yellow, and red gradient.
 
 All values are six-digit hex strings, for example `"#ff5733"`. Help-key pill
 text switches between black and white for readable contrast.

@@ -48,7 +48,7 @@ var (
 			Foreground(ui.ColorDim)
 
 	playlistActiveStyle = lipgloss.NewStyle().
-				Foreground(ui.ColorPlaying).
+				Foreground(ui.ColorAccent).
 				Bold(true)
 
 	playlistItemStyle = lipgloss.NewStyle().
@@ -86,7 +86,7 @@ func rebuildModelStyles() {
 	labelStyle = lipgloss.NewStyle().Foreground(ui.ColorText).Bold(true)
 	eqActiveStyle = lipgloss.NewStyle().Foreground(ui.ColorAccent).Bold(true)
 	eqInactiveStyle = lipgloss.NewStyle().Foreground(ui.ColorDim)
-	playlistActiveStyle = lipgloss.NewStyle().Foreground(ui.ColorPlaying).Bold(true)
+	playlistActiveStyle = lipgloss.NewStyle().Foreground(ui.ColorAccent).Bold(true)
 	playlistItemStyle = lipgloss.NewStyle().Foreground(ui.ColorText)
 	playlistSelectedStyle = lipgloss.NewStyle().Foreground(ui.ColorAccent).Bold(true)
 	playlistUnavailableStyle = lipgloss.NewStyle().Foreground(ui.ColorDim)
@@ -96,6 +96,6 @@ func rebuildModelStyles() {
 
 	seekFillStyle = lipgloss.NewStyle().Foreground(ui.ColorSeekBar)
 	seekDimStyle = lipgloss.NewStyle().Foreground(ui.ColorDim)
-	volBarStyle = lipgloss.NewStyle().Foreground(ui.ColorVolume)
+	volBarStyle = lipgloss.NewStyle().Foreground(ui.ColorAccent)
 	activeToggle = lipgloss.NewStyle().Foreground(ui.ColorAccent).Bold(true)
 }
