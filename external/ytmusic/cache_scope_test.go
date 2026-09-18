@@ -14,7 +14,7 @@ func TestYTCacheRejectsDifferentOAuthAccount(t *testing.T) {
 	}
 	scopeA := storedOAuthCacheScope("client")
 	cache := newYTCache(scopeA)
-	cache.setPlaylists([]playlistEntry{{ID: "private", Name: "Private"}})
+	cache.setPlaylists([]playlistEntry{{ID: "private", Name: "Private"}}, nil)
 	cache.setTracks("private", []playlist.Track{{Title: "Secret"}})
 	saveSnapshot(cache.snapshot())
 
@@ -40,7 +40,7 @@ func TestYTCacheRejectsLegacyUnscopedData(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	legacy := newYTCache("")
-	legacy.setPlaylists([]playlistEntry{{ID: "old", Name: "Old"}})
+	legacy.setPlaylists([]playlistEntry{{ID: "old", Name: "Old"}}, nil)
 	saveSnapshot(legacy.snapshot())
 
 	loaded := loadYTCache(storedOAuthCacheScope("client"))
@@ -55,7 +55,7 @@ func TestOAuthCacheScopeBoundToProvider(t *testing.T) {
 	if err := saveCreds(&storedCreds{RefreshToken: "account-a"}); err != nil {
 		t.Fatal(err)
 	}
-	b := newBase(nil, "client", "secret", false)
+	b := newBase(nil, "client", "secret", "")
 	scopeA := b.cacheScope
 
 	if err := saveCreds(&storedCreds{RefreshToken: "account-b"}); err != nil {

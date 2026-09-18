@@ -221,7 +221,7 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 			if player.YTDLPAvailable() {
 				var all, video, music playlist.Provider
 				if explicitOAuth {
-					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, hasCookies)
+					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, cfg.YouTubeMusic.CookiesFrom)
 					all, video, music = oauthProviders.All, oauthProviders.Video, oauthProviders.Music
 					closeYouTube = oauthProviders.Music.Close
 				} else if hasCookies {
@@ -229,7 +229,7 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 					all, video, music = cookieProviders.All, cookieProviders.Video, cookieProviders.Music
 					closeYouTube = cookieProviders.Music.Close
 				} else if hasFallbackOAuth {
-					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, false)
+					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, "")
 					all, video, music = oauthProviders.All, oauthProviders.Video, oauthProviders.Music
 					closeYouTube = oauthProviders.Music.Close
 				}

@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/playlist"
+	"github.com/bjarneo/cliamp/resolve"
 
 	"google.golang.org/api/youtube/v3"
 )
@@ -24,34 +26,45 @@ type itemInfo struct {
 // youtubeAPIBatchSize is the maximum number of items per YouTube Data API request.
 const youtubeAPIBatchSize = 50
 
+// ytmLibraryTimeout bounds the YouTube Music library listing, which shells out
+// to yt-dlp for cookies and then pages through InnerTube.
+const ytmLibraryTimeout = 45 * time.Second
+
 // baseProvider holds shared state for YouTube and YouTube Music providers.
 // Both providers share the same OAuth session and track cache.
 type baseProvider struct {
-	session      *Session
-	clientID     string
-	clientSecret string
-	hasCookies   bool // true when cookies_from is configured
-	mu           sync.Mutex
-	trackCache   map[string][]playlist.Track // playlist ID -> cached tracks
-	allPlaylists []playlistEntry             // cached raw playlist list
-	classified   map[string]bool             // playlist ID -> is music (from classify.go)
-	disk         *ytCache                    // lazy-loaded disk cache
-	cacheScope   string                      // immutable identity of the active OAuth account
-	authCancel   context.CancelFunc          // cancels any in-progress OAuth flow
+	session         *Session
+	clientID        string
+	clientSecret    string
+	cookiesFrom     string // browser name for yt-dlp --cookies-from-browser ("" when unset)
+	hasCookies      bool   // true when cookies_from is configured
+	fetchLibrary    func(browser string) ([]playlist.PlaylistInfo, error)
+	fetchYTMLibrary func(ctx context.Context, browser string) ([]string, error)
+	mu              sync.Mutex
+	trackCache      map[string][]playlist.Track // playlist ID -> cached tracks
+	allPlaylists    []playlistEntry             // cached raw playlist list
+	classified      map[string]bool             // playlist ID -> is music (from classify.go)
+	disk            *ytCache                    // lazy-loaded disk cache
+	cacheScope      string                      // immutable identity of the active OAuth account
+	authCancel      context.CancelFunc          // cancels any in-progress OAuth flow
 }
 
-func newBase(session *Session, clientID, clientSecret string, hasCookies bool) *baseProvider {
+func newBase(session *Session, clientID, clientSecret, cookiesFrom string) *baseProvider {
+	cookiesFrom = strings.TrimSpace(cookiesFrom)
 	cacheScope := storedOAuthCacheScope(strings.TrimSpace(clientID))
 	if session != nil && session.cacheScope != "" {
 		cacheScope = session.cacheScope
 	}
 	return &baseProvider{
-		session:      session,
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		hasCookies:   hasCookies,
-		trackCache:   make(map[string][]playlist.Track),
-		cacheScope:   cacheScope,
+		session:         session,
+		clientID:        clientID,
+		clientSecret:    clientSecret,
+		cookiesFrom:     cookiesFrom,
+		hasCookies:      cookiesFrom != "",
+		fetchLibrary:    resolve.FetchUserPlaylists,
+		fetchYTMLibrary: ytmLibraryPlaylistIDs,
+		trackCache:      make(map[string][]playlist.Track),
+		cacheScope:      cacheScope,
 	}
 }
 
@@ -181,6 +194,11 @@ func (b *baseProvider) fetchAndClassify() error {
 				}
 			}
 			if allClassified {
+				// The disk classification holds category-derived verdicts only;
+				// re-apply the YouTube Music override on top of it.
+				for _, id := range dc.YTMPlaylists {
+					classified[id] = true
+				}
 				b.allPlaylists = dc.Playlists
 				b.classified = classified
 				b.mu.Unlock()
@@ -203,8 +221,20 @@ func (b *baseProvider) fetchAndClassify() error {
 		return fmt.Errorf("ytmusic: session unavailable")
 	}
 	svc := sess.Service()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	// The library scrape shells out to yt-dlp, so start it now and let it run
+	// alongside the API listing below.
+	type libraryResult struct {
+		ids   []string
+		inYTM map[string]bool
+	}
+	libraryCh := make(chan libraryResult, 1)
+	go func() {
+		ids, inYTM := b.librarySources()
+		libraryCh <- libraryResult{ids, inYTM}
+	}()
 
 	var all []playlistEntry
 	seen := make(map[string]bool)
@@ -243,10 +273,28 @@ func (b *baseProvider) fetchAndClassify() error {
 		pageToken = resp.NextPageToken
 	}
 
+	// Mine(true) only returns playlists the user owns. Playlists saved to the
+	// library from other channels have no listing endpoint in the Data API, so
+	// their IDs come from the browser session and are hydrated by ID here.
+	library := <-libraryCh
+	var saved []string
+	for _, id := range library.ids {
+		// Liked Music / Liked Videos are pinned separately by each provider.
+		if id == playlistIDLikedMusic || id == playlistIDLikedVideos || seen[id] {
+			continue
+		}
+		seen[id] = true
+		saved = append(saved, id)
+	}
+	hydrated := b.hydratePlaylists(ctx, svc, saved)
+	applog.Debug("youtube: %d owned playlists, %d saved playlists resolved from %d library IDs",
+		len(all), len(hydrated), len(saved))
+	all = append(all, hydrated...)
+
 	// Classify playlists (parallel, with disk cache).
 	// Pass nil to let classifyPlaylists load from disk itself —
 	// the earlier loadClassification() was skipped because cache was stale.
-	classified := classifyWithTimeout(svc, all, 60*time.Second, nil, cacheScope)
+	classified := classifyWithTimeout(svc, all, 60*time.Second, nil, cacheScope, library.inYTM)
 
 	b.mu.Lock()
 	if b.allPlaylists != nil {
@@ -256,9 +304,10 @@ func (b *baseProvider) fetchAndClassify() error {
 	}
 	b.allPlaylists = all
 	b.classified = classified
-	// Persist playlists to disk cache.
+	// Persist playlists to disk cache. YouTube Music membership is stored
+	// alongside them so a cache-only boot can re-apply the same override.
 	dc = b.ensureDiskCache()
-	dc.setPlaylists(all)
+	dc.setPlaylists(all, library.inYTM)
 	snap := dc.snapshot()
 	b.mu.Unlock()
 
@@ -266,6 +315,100 @@ func (b *baseProvider) fetchAndClassify() error {
 	saveSnapshot(snap)
 
 	return nil
+}
+
+// librarySources returns the playlist IDs in the user's library, plus the set
+// of those that live in the YouTube Music library specifically — membership
+// there is what marks a playlist as music (see classifyPlaylists). Including
+// playlists saved from other channels. The Data API cannot list these —
+// Playlists.List only filters by owner (mine) or channel — so they come from
+// the signed-in browser session, merged from two places that do not overlap:
+// the YouTube feed and the YouTube Music library. Returns nil when no cookie
+// source is configured; either source failing is non-fatal, since the owned
+// playlists still list.
+func (b *baseProvider) librarySources() (ids []string, inYTM map[string]bool) {
+	inYTM = make(map[string]bool)
+	if b.cookiesFrom == "" {
+		return nil, inYTM
+	}
+	fetch := b.fetchLibrary
+	if fetch == nil {
+		fetch = resolve.FetchUserPlaylists
+	}
+
+	seen := make(map[string]bool)
+	add := func(id string) {
+		if id = strings.TrimSpace(id); id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
+	// The YouTube feed (youtube.com/feed/playlists).
+	pls, err := fetch(b.cookiesFrom)
+	if err != nil {
+		// Non-fatal: owned playlists still list. Surface it though — the usual
+		// cause is yt-dlp being unable to read browser cookies, which is
+		// invisible otherwise.
+		applog.UserWarn("youtube: cannot list saved playlists from %s cookies: %v", b.cookiesFrom, err)
+	} else {
+		applog.Debug("youtube: feed scrape returned %d playlists from %s cookies", len(pls), b.cookiesFrom)
+		for _, pl := range pls {
+			add(pl.ID)
+		}
+	}
+
+	// The YouTube Music library, which the feed above does not cover.
+	fetchYTM := b.fetchYTMLibrary
+	if fetchYTM == nil {
+		fetchYTM = ytmLibraryPlaylistIDs
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ytmLibraryTimeout)
+	defer cancel()
+	ytmIDs, err := fetchYTM(ctx, b.cookiesFrom)
+	if err != nil {
+		applog.UserWarn("youtube music: cannot list library playlists: %v", err)
+	} else {
+		applog.Debug("youtube music: library returned %d playlists", len(ytmIDs))
+		for _, id := range ytmIDs {
+			if id = strings.TrimSpace(id); id != "" {
+				inYTM[id] = true
+			}
+			add(id)
+		}
+	}
+
+	return ids, inYTM
+}
+
+// hydratePlaylists resolves playlist IDs into entries via the Data API, which
+// serves any playlist by ID regardless of owner. IDs that are unreachable
+// (private, deleted) or empty are dropped.
+func (b *baseProvider) hydratePlaylists(ctx context.Context, svc *youtube.Service, ids []string) []playlistEntry {
+	var out []playlistEntry
+	for i := 0; i < len(ids); i += youtubeAPIBatchSize {
+		end := min(i+youtubeAPIBatchSize, len(ids))
+		resp, err := svc.Playlists.List([]string{"snippet", "contentDetails"}).
+			Id(ids[i:end]...).
+			MaxResults(youtubeAPIBatchSize).
+			Context(ctx).
+			Do()
+		if err != nil {
+			continue
+		}
+		for _, item := range resp.Items {
+			count := int(item.ContentDetails.ItemCount)
+			if count <= 0 {
+				continue
+			}
+			out = append(out, playlistEntry{
+				ID:         item.Id,
+				Name:       item.Snippet.Title,
+				TrackCount: count,
+			})
+		}
+	}
+	return out
 }
 
 // filteredPlaylists returns playlists filtered by music classification.
@@ -575,9 +718,11 @@ type Providers struct {
 	All   *YouTubeAllProvider
 }
 
-// New creates all three YouTube providers with a shared session.
-func New(session *Session, clientID, clientSecret string, hasCookies bool) Providers {
-	base := newBase(session, clientID, clientSecret, hasCookies)
+// New creates all three YouTube providers with a shared session. cookiesFrom
+// is the browser name for yt-dlp cookie extraction ("" when not configured);
+// when set, playlists saved to the user's library are listed too.
+func New(session *Session, clientID, clientSecret, cookiesFrom string) Providers {
+	base := newBase(session, clientID, clientSecret, cookiesFrom)
 	return Providers{
 		Music: &YouTubeMusicProvider{base: base},
 		Video: &YouTubeProvider{base: base},

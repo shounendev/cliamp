@@ -10,14 +10,14 @@ import (
 func TestRefreshInvalidatesAllCaches(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	b := newBase(nil, "client-id", "client-secret", false)
+	b := newBase(nil, "client-id", "client-secret", "")
 
 	b.allPlaylists = []playlistEntry{{ID: "p1", Name: "One", TrackCount: 5}}
 	b.classified = map[string]bool{"p1": true}
 	b.trackCache["p1"] = []playlist.Track{{Path: "https://example/v", Title: "t"}}
 
 	dc := b.ensureDiskCache()
-	dc.setPlaylists(b.allPlaylists)
+	dc.setPlaylists(b.allPlaylists, nil)
 	dc.setTracks("p1", b.trackCache["p1"])
 	saveSnapshot(dc.snapshot())
 
